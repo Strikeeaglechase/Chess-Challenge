@@ -10,190 +10,278 @@ namespace ChessChallenge.Example
     // Plays randomly otherwise.
     public class EvilBot : IChessBot
     {
-        public int[] pieceVals = { 0, 100, 300, 320, 500, 900, 10000 }; // nothing, pawn, knight, bishop, rook, queen, king
-        /// <summary>
+        //GLOBAL variables
+        ushort searchDepth = 3;
+        ushort turnIndex = 0;
 
-        /// Blind Bot:
-        /// Probably the best chess bot that CANNOT look ahead!
-        /// This was a fun challenge!
-        /// This bot can only check evaluation for the current move using a very complex hand-made evaluation function
-        /// This took a while!
-        /// The most major advantage is that it finishes each move in ~5 ms.
-        /// In the massive fight, this can only win against bots who check up to like 30 moves.
-        /// However I think this would be an intresting experiment and would be fun for the grand finale video.
+        // a dictionary where the key value pairs are  <FEN,move(Eq."a2a4")>
+        string[] openings = new string[] { 
+        //BLACK OPENINGS
+        "d7d5",
+        //WHITE OPENINGS
+        "e2e4"
+    };
 
-        /// </summary>
-        int movesSinceLastPawnMove = 0;
-
-        int kingDSTfromOpponentKing(Board board)
-        {
-            Square myKingSquare = board.GetKingSquare(board.IsWhiteToMove);
-            Square oKingSquare = board.GetKingSquare(!board.IsWhiteToMove);
-            int fileDist = Math.Abs(myKingSquare.File - oKingSquare.File);
-            int rankDist = Math.Abs(myKingSquare.Rank - oKingSquare.Rank);
-            int dst = fileDist + rankDist;
-            return dst;
-        }
-
-        public Move[] GetEnemyMoves(Board board)
-        {
-            board.MakeMove(Move.NullMove);
-            Move[] enemyMoves = board.GetLegalMoves();
-            board.UndoMove(Move.NullMove);
-            return enemyMoves;
-        }
-
-        int piecesLeft(Board board)
-        {
-            int count = 0;
-            for (var i = 0; i < 64; i++)
-                if (board.GetPiece(new Square(i)).PieceType != PieceType.None) count++;
-            return count;
-        }
-
-        bool moveIsCheckmate(Board board, Move move)
-        {
-            board.MakeMove(move);
-            bool isMate = board.IsInCheckmate();
-            board.UndoMove(move);
-            return isMate;
-        }
-
-        bool moveIsCheck(Board board, Move move)
-        {
-            board.MakeMove(move);
-            bool isCheck = board.IsInCheck();
-            board.UndoMove(move);
-            return isCheck;
-        }
+        string[] centerSquares = new string[] {
+        "c6","d6","e6","f6",
+        "c5","d5","e5","f5",
+        "c4","d4","e4","f4",
+        "c3","d3","e3","f3"
+    };
+        int[] preferedWhitePawnRows = new int[] {
+        5,6,7
+    };
+        int[] preferedBlackPawnRows = new int[] {
+        0,1,2
+    };
 
 
-        bool moveHasBeenPlayed(Board board, Move move)
-        {
-            board.MakeMove(move);
-            bool hasBeenPlayed = board.IsDraw();
-            board.UndoMove(move);
-            return hasBeenPlayed;
-        }
-
-
-        int evaluateMove(Move move, Board board) // evaluates the move
-        {
-            int piecesLeftnow = piecesLeft(board);
-            PieceType capturedPiece = move.CapturePieceType;
-            int eval = 0;
-            eval = pieceVals[(int)capturedPiece];
-            if (eval > 0) { eval += 5; }
-            if (board.SquareIsAttackedByOpponent(move.TargetSquare)) // uh oh here come the piece square tables
-            {
-                eval -= pieceVals[(int)move.MovePieceType];
-            }
-            ///<summary>
-            /// Piece square tables for all pieces except king.
-            /// This also includes that you should push out your queen early game.
-            /// This will priortise "good" moves like castling and promoting over worse moves.
-            /// It will also transition into endgame tables where your queen and rook are more important.
-            /// This is responsible for more than half of the tokens BTW.
-            /// </summary>
-            if (move.MovePieceType == PieceType.Knight)// Knight piece square table, will prefer to be in the middle.
-            {
-                eval += 15;
-                if (move.TargetSquare.File == 7 || move.TargetSquare.File == 6 || move.TargetSquare.File == 0 || move.TargetSquare.File == 1) eval -= 60;
-                if (move.TargetSquare.File == 2 || move.TargetSquare.File == 3 || move.TargetSquare.File == 4 || move.TargetSquare.File == 5) if (move.TargetSquare.Rank == 2 || move.TargetSquare.Rank == 3 || move.TargetSquare.Rank == 4 || move.TargetSquare.Rank == 5) eval += 45;
-            }
-            if (move.MovePieceType == PieceType.Bishop)// Bishop piece square table
-            {
-                if (piecesLeftnow > 28) eval -= 30;
-                eval += 15;
-                if (move.TargetSquare.File == 2 || move.TargetSquare.File == 3 || move.TargetSquare.File == 4 || move.TargetSquare.File == 5)
-                {
-                    if (move.TargetSquare.Rank == 2 || move.TargetSquare.Rank == 3 || move.TargetSquare.Rank == 4 || move.TargetSquare.Rank == 5) eval += 45;
-                }
-            }
-            if (move.MovePieceType == PieceType.Rook)// Rook piece square table + transition to endgame
-            {
-                if (board.IsWhiteToMove) { if (move.TargetSquare.Rank == 7) eval += 40; }
-                else if (move.TargetSquare.Rank == 2) eval += 40;
-                if (move.TargetSquare.File == 3 || move.TargetSquare.File == 4) eval += 30;
-                if (piecesLeftnow > 28) eval -= 30;
-                eval -= 20;
-            }
-            if (move.MovePieceType == PieceType.Queen)// Queen piece square table + transition to mid/endgame
-            {
-                if (piecesLeftnow < 14) eval += 25;
-                else eval -= 90;
-                if (move.TargetSquare.File == 2 || move.TargetSquare.File == 3 || move.TargetSquare.File == 4 || move.TargetSquare.File == 5)
-                {
-                    if (move.TargetSquare.Rank == 2 || move.TargetSquare.Rank == 3 || move.TargetSquare.Rank == 4 || move.TargetSquare.Rank == 5) eval += 45;
-                }
-            }
-
-            if (move.MovePieceType == PieceType.Pawn)// Pawn "piece square table" This is mainly for early game
-            {
-                if (movesSinceLastPawnMove >= 25) eval += 25;
-                if (piecesLeftnow < 14 || piecesLeftnow > 28) eval += 10;
-                if (move.TargetSquare.File == 4 || move.TargetSquare.File == 5) eval += 30;
-                eval += 5;
-                if (piecesLeftnow < 8) eval += 70;
-            }
-
-            if (move.IsCastles) eval += 50; // castling is encouraged
-
-            // We're out of the piece square tables!
-            // This is for the flags to buff certain moves and nerf others
-            // e.g. Checkmate is the highest priority move tied with en passant
-            // Drawing is discouraged massively.
-            // Checks are encouraged.
-            // Moving away a piece that is attack is encouraged heavily.
-            // Promotions are worth sacrificing a rook
-
-            if (moveIsCheckmate(board, move)) eval = 999999999;
-            if (moveHasBeenPlayed(board, move)) eval -= 1000;
-            if (moveIsCheck(board, move)) eval += 20;
-            if (board.SquareIsAttackedByOpponent(move.StartSquare)) eval += 120;
-            if (move.IsPromotion) eval += 600;
-
-            int currentDist = kingDSTfromOpponentKing(board);
-            board.MakeMove(move);
-            int newDist = kingDSTfromOpponentKing(board);
-            board.UndoMove(move);
-            if (piecesLeftnow < 6)
-            {
-                if (newDist < currentDist) eval += 99;
-            }
-            else if (piecesLeftnow < 10) eval += 55;
-            foreach (Move move2 in GetEnemyMoves(board))
-            {
-                if (moveIsCheckmate(board, move2)) eval -= 10000000;
-                if (moveIsCheck(board, move2)) eval -= 60;
-                if (moveHasBeenPlayed(board, move2)) eval -= 50000;
-                if (move2.IsCapture) eval -= pieceVals[(int)move2.CapturePieceType];
-                if (GetEnemyMoves(board).Length == 1) eval += 80;
-            }
-
-            return eval;
-
-
-        }
-
-
+        // Piece values: null, pawn, knight, bishop, rook, queen, king
+        ushort[] pieceValues = { 100, 300, 300, 450, 950 };
 
         public Move Think(Board board, Timer timer)
         {
             Move[] moves = board.GetLegalMoves();
-            Move moveToPlay = moves[0];
-            int bestEvaluation = -999999;
-            foreach (Move move in moves)
+
+            Move chosenMove = GetMove(board, turnIndex);
+            turnIndex++;
+
+            return chosenMove;
+        }
+
+        private short GetBoardValue(Board board)
+        {
+            // Add up all white pieces value
+            // Substract all black pieces value
+            // return value if we are white, else return the opposite number
+
+            short value = 0;
+
+            PieceList[] pieceLists = board.GetAllPieceLists();
+
+            for (ushort i = 0; i < pieceLists.Length - 2; i++)
             {
-                if (evaluateMove(move, board) > bestEvaluation)
+                if (i < 5)
                 {
-                    bestEvaluation = evaluateMove(move, board);
-                    moveToPlay = move;
+                    value += (short)(pieceValues[i % 5] * pieceLists[i].Count);
+                }
+                else
+                {
+                    value -= (short)(pieceValues[i % 5] * pieceLists[i + 1].Count);
+
                 }
             }
-            if (moveToPlay.MovePieceType == PieceType.Pawn) movesSinceLastPawnMove = 0;
-            else movesSinceLastPawnMove++;
-            return moveToPlay;
+
+            if (board.IsWhiteToMove)
+                return value;
+            else
+            {
+                return (short)(-value);
+            }
+
+        }
+        private short GetDirectMoveValue(Board board, Move move)
+        {
+            short value = 0;
+
+            board.MakeMove(move);
+            //  if the move is a check mate we choose this one
+            if (board.IsInCheckmate())
+            {
+                value += 25000;
+            }
+            //check yields a higher value then pawn moves
+            if (board.IsInCheck())
+            {
+                value += 28;
+            }
+            if (!board.IsInCheck() && board.GetLegalMoves().Length == 0)
+            {
+                value -= 25000;
+            }
+
+            board.UndoMove(move);
+
+            Square targetSquare = move.TargetSquare;
+
+            switch (board.GetPiece(move.StartSquare).PieceType)
+            {
+                case PieceType.Pawn:
+                    value += 11;
+                    if (board.IsWhiteToMove)
+                    {
+                        if (preferedWhitePawnRows.Contains(targetSquare.Rank))
+                        {
+                            value += 16;
+                        }
+                    }
+                    else
+                    {
+                        if (preferedBlackPawnRows.Contains(targetSquare.Rank))
+                        {
+                            value += 16;
+                        }
+                    }
+                    break;
+                case PieceType.Knight:
+                    if (centerSquares.Contains(targetSquare.Name))
+                    {
+                        value += 9;
+                    }
+                    break;
+                case PieceType.Bishop:
+                    if (centerSquares.Contains(targetSquare.Name))
+                    {
+                        value += 4;
+                    }
+                    break;
+                case PieceType.Rook:
+                    if (centerSquares.Contains(targetSquare.Name))
+                    {
+                        value += 2;
+                    }
+                    break;
+                case PieceType.Queen:
+                    if (centerSquares.Contains(targetSquare.Name))
+                    {
+                        value += 2;
+                    }
+                    break;
+                case PieceType.King:
+                    value -= 22;
+                    if (move.IsCastles)
+                    {
+                        value += 88;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            // we like capture trades
+            if (move.IsCapture)
+            {
+                if (GetBoardValue(board) >= 0)
+                {
+                    value += 31;
+                }
+                else
+                {
+                    value -= 20;
+                }
+            }
+
+            return value;
+        }
+
+        private Move GetMove(Board board, int turn)
+        {
+            List<Move> bestMoves = new List<Move>();
+            //We get the best moves through minmax algorithm
+            GetMoveEval(board, searchDepth, -99999, 99999, true, bestMoves);
+
+            foreach (string opening in openings)
+            {
+                if (bestMoves.Contains(new Move(opening, board)))
+                {
+                    return new Move(opening, board);
+                }
+            }
+
+            Move bestMove = bestMoves[0];
+            short bestMoveValue = GetDirectMoveValue(board, bestMove);
+            foreach (Move move in bestMoves)
+            {
+                short value = GetDirectMoveValue(board, move);
+                if (value > bestMoveValue)
+                {
+                    bestMove = move;
+                    bestMoveValue = value;
+                }
+            }
+
+
+            return bestMove;
+        }
+
+        private short GetMoveEval(Board board, int depth, int alpha, int beta, bool isMaximizingPlayer, List<Move> bestMoves)
+        {
+            //NOTE : needs working implementation of the pruning algorithm
+            //Chess version of the MINMAX algorithm 
+
+            Move[] moves = board.GetLegalMoves();
+
+            if (isMaximizingPlayer)
+            {
+                short maxEval = -30000;
+                foreach (Move move in moves)
+                {
+                    board.MakeMove(move);
+                    short eval = 0;
+                    eval = GetMoveEval(board, depth - 1, alpha, beta, false, bestMoves);
+
+                    if (eval > maxEval)
+                    {
+                        maxEval = eval;
+                        if (depth == searchDepth)
+                        {
+                            bestMoves.Clear();
+                            bestMoves.Add(move);
+                        }
+                    }
+                    else if (depth == searchDepth && eval == maxEval)
+                    {
+                        bestMoves.Add(move);
+                    }
+
+                    board.UndoMove(move);
+                    // Attempt to alpha beta pruning (NOT WORKING YET)
+                    /*
+                    if (eval > alpha)
+                    {
+                        alpha = eval;
+                    }
+                    if (beta <= alpha)
+                    {
+                        break;
+                    }
+                    */
+                }
+                return maxEval;
+            }
+            else
+            {
+                short minEval = 30000;
+                foreach (Move move in moves)
+                {
+                    board.MakeMove(move);
+                    short eval = 0;
+                    if (depth > 0)
+                    {
+                        eval = GetMoveEval(board, depth - 1, alpha, beta, true, bestMoves);
+                    }
+                    else
+                    {
+                        eval = GetBoardValue(board);
+
+                    }
+                    if (eval < minEval)
+                    {
+                        minEval = eval;
+                    }
+                    board.UndoMove(move);
+                    /*
+                    if (eval < beta)
+                    {
+                        beta = eval;
+                    }
+                    if (beta <= alpha)
+                    {
+                        break;
+                    }
+                    */
+                }
+                return minEval;
+            }
         }
     }
 }

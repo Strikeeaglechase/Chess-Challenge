@@ -11,34 +11,91 @@ public class MyBot : IChessBot
     private Random rng;
     private const int defaultSearchDepth = 5;
     private float lastTimeSpent = 0;
-    private int lastDepth = 3;
+    private int searchDepth = 3;
+    private Timer timer;
+    private int maxTime = 5000;
+    private bool needsRetry = false;
+    private bool isOnRetry = false;
+    private List<Move> equalToBest;
+    private Move best;
+    private int bestScore;
+
     public MyBot()
     {
         Logger.Init();
-        rng = new Random(1776);
+        rng = new Random();
     }
 
     public Move Think(Board board, Timer timer)
     {
         checks = 0;
         me = board.IsWhiteToMove;
+        this.timer = timer;
+        needsRetry = false;
+        isOnRetry = false;
 
         Move[] moves = board.GetLegalMoves();
-        Move best = Move.NullMove;
-        List<Move> equalToBest = new List<Move>();
-        var bestScore = -100000;
 
-        int searchDepth = lastDepth;
-        int maxTimePerMove = timer.MillisecondsRemaining > 30000 ? 2000 : 1000;
-        int minTimePerMove = timer.MillisecondsRemaining > 30000 ? 500 : 250;
+        UpdateDepthSetting();
+        FindBestWithRetry(board, moves, searchDepth);
+
+        if (equalToBest.Count > 0)
+        {
+            best = equalToBest[rng.Next(equalToBest.Count)];
+        }
+
+        if (best == Move.NullMove) best = moves[rng.Next(moves.Length)];
+
+
+        lastTimeSpent = timer.MillisecondsElapsedThisTurn;
+        Console.WriteLine($"Eval: {bestScore}. Number of node searched: {checks}. Used depth: {searchDepth}. Spent: {lastTimeSpent}ms");
+        return best;
+    }
+
+    private void UpdateDepthSetting()
+    {
+        int maxTimePerMove = 2000;
+        int minTimePerMove = 500;
+
+        var left = timer.MillisecondsRemaining;
+        if (left < 30000) { maxTimePerMove = 1000; minTimePerMove = 250; }
+        if (left < 15000) { maxTimePerMove = 500; minTimePerMove = 150; }
+        if (left < 5000) { maxTimePerMove = 500; minTimePerMove = 50; }
+
         if (lastTimeSpent > maxTimePerMove) searchDepth--;
         if (lastTimeSpent < minTimePerMove) searchDepth++;
+    }
+
+    private void FindBestWithRetry(Board board, Move[] moves, int depthToUse)
+    {
+        bestScore = -100000;
+        best = Move.NullMove;
+        equalToBest = new List<Move>();
 
         foreach (var move in moves)
         {
             board.MakeMove(move);
 
-            var score = MinimaxEval(board, searchDepth); // If we are black, invert score. Black is winning when negative
+            if (move.IsEnPassant)
+            {
+                best = move;
+                equalToBest.Clear();
+                Console.WriteLine("Holy hell.");
+                return;
+            }
+
+            var score = MinimaxEval(board, depthToUse); // If we are black, invert score. Black is winning when negative
+
+            // We hit a retry! We need to go quicker
+            if (needsRetry)
+            {
+                Console.WriteLine($"Starting retry!");
+                needsRetry = false;
+                board.UndoMove(move);
+                FindBestWithRetry(board, moves, searchDepth - 2);
+                return;
+            }
+
             var resultScore = score * Mult(me);
             if (resultScore > bestScore)
             {
@@ -53,23 +110,18 @@ public class MyBot : IChessBot
 
             board.UndoMove(move);
         }
-
-        if (equalToBest.Count > 0)
-        {
-            best = equalToBest[rng.Next(equalToBest.Count)];
-        }
-
-        if (best == Move.NullMove) best = moves[rng.Next(moves.Length)];
-
-
-        lastTimeSpent = timer.MillisecondsElapsedThisTurn;
-        lastDepth = searchDepth;
-        Console.WriteLine($"Eval: {bestScore}. Number of node searched: {checks}. Used depth: {searchDepth}. Spent: {lastTimeSpent}ms");
-        return best;
     }
 
     private int MinimaxEval(Board board, int depth = defaultSearchDepth, int alpha = int.MinValue, int beta = int.MaxValue)
     {
+        if (!isOnRetry && timer.MillisecondsElapsedThisTurn > maxTime)
+        {
+            needsRetry = true;
+            isOnRetry = true;
+            Console.WriteLine($"Time limit expired!");
+        }
+        if (needsRetry) return 0;
+
         checks++;
         if (board.IsInCheckmate()) return -100000 * Mult(board.IsWhiteToMove); // Checkmate and white to move = black won
         if (board.IsDraw()) return 0;
