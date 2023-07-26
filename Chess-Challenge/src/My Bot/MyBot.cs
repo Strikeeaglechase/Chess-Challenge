@@ -7,197 +7,291 @@ using System.Linq;
 public class MyBot : IChessBot
 {
     private bool me;
-    private int checks = 0;
+    private int nodes;
     private Random rng;
-    private const int defaultSearchDepth = 5;
-    private float lastTimeSpent = 0;
-    private int searchDepth = 3;
     private Timer timer;
-    private int maxTime = 5000;
-    private bool needsRetry = false;
-    private bool isOnRetry = false;
-    private List<Move> equalToBest;
-    private Move best;
-    private int bestScore;
+
+    private const int lVal = 100000;
+
+    private List<Move> currentEqualToBest;
+    private Move currentItrBest;
+    private int currentBestScore;
+
+    private Move bestFoundEver;
+    private int bestFoundEverScore;
+    private List<Move> equalToBest = new();
+
+    private int maxTimeAllowed;
+
 
     public MyBot()
     {
         Logger.Init();
-        rng = new Random();
+        rng = new Random(1776);
     }
 
     public Move Think(Board board, Timer timer)
     {
-        checks = 0;
+        if (board.PlyCount == 0) return new Move("e2e4", board);
+        if (board.PlyCount == 1) return new Move("d7d5", board);
+
+        Console.WriteLine($"EG Score: {CalculateEGScore(board)}");
+        // foreach (var list in board.GetAllPieceLists())
+        // {
+        //     foreach (var piece in list)
+        //     {
+        //         var pst = PiecePosScore(piece);
+        //         Console.WriteLine($"{piece.Square} {piece.PieceType} {pst}");
+        //     }
+        // }
+
+        nodes = 0;
         me = board.IsWhiteToMove;
         this.timer = timer;
-        needsRetry = false;
-        isOnRetry = false;
 
-        Move[] moves = board.GetLegalMoves();
+        Move[] moves = GetSortedMoves(board, Move.NullMove);
 
-        UpdateDepthSetting();
-        FindBestWithRetry(board, moves, searchDepth);
+        FindBestIter(board, moves);
 
-        if (equalToBest.Count > 0)
+        if (equalToBest.Count > 0) bestFoundEver = equalToBest[rng.Next(equalToBest.Count)];
+
+        if (bestFoundEver == Move.NullMove)
         {
-            best = equalToBest[rng.Next(equalToBest.Count)];
+            bestFoundEver = moves[rng.Next(moves.Length)];
+            Console.WriteLine($"Was forced to use pure random move! Best found ever is null!");
         }
 
-        if (best == Move.NullMove) best = moves[rng.Next(moves.Length)];
 
+        Console.WriteLine($"Eval: {currentBestScore}. Number of node searched: {nodes}. Spent: {timer.MillisecondsElapsedThisTurn}ms");
 
-        lastTimeSpent = timer.MillisecondsElapsedThisTurn;
-        Console.WriteLine($"Eval: {bestScore}. Number of node searched: {checks}. Used depth: {searchDepth}. Spent: {lastTimeSpent}ms");
-        return best;
+        return bestFoundEver;
     }
 
-    private void UpdateDepthSetting()
+    private void FindBestIter(Board board, Move[] moves)
     {
-        int maxTimePerMove = 2000;
-        int minTimePerMove = 500;
+        int depth = 1;
+        int bufferTime = 5000; // Save 5 seconds of time, this just helps prevent timeouts near endgames
+        int tLeft = timer.MillisecondsRemaining - bufferTime;
+        int div = 30;
+        if (tLeft < 30000) div = 15;
+        if (tLeft < 15000) div = 10;
 
-        var left = timer.MillisecondsRemaining;
-        if (left < 30000) { maxTimePerMove = 1000; minTimePerMove = 250; }
-        if (left < 15000) { maxTimePerMove = 500; minTimePerMove = 150; }
-        if (left < 5000) { maxTimePerMove = 500; minTimePerMove = 50; }
+        maxTimeAllowed = Math.Max(tLeft / div, 50);
 
-        if (lastTimeSpent > maxTimePerMove) searchDepth--;
-        if (lastTimeSpent < minTimePerMove) searchDepth++;
-    }
-
-    private void FindBestWithRetry(Board board, Move[] moves, int depthToUse)
-    {
-        bestScore = -100000;
-        best = Move.NullMove;
-        equalToBest = new List<Move>();
-
-        foreach (var move in moves)
+        while (true)
         {
-            board.MakeMove(move);
+            currentBestScore = -100000;
+            currentItrBest = Move.NullMove;
+            currentEqualToBest = new List<Move>();
 
-            if (move.IsEnPassant)
+            // If we have less than 50% of our time left, no point even trying another cycle. We won't have time for it
+            float precTimeLeft = ((float)maxTimeAllowed - timer.MillisecondsElapsedThisTurn) / maxTimeAllowed;
+            if (precTimeLeft < 0.5f)
             {
-                best = move;
-                equalToBest.Clear();
-                Console.WriteLine("Holy hell.");
+                Console.WriteLine($"Ending at depth {depth} after {timer.MillisecondsElapsedThisTurn}ms due to <50% time left");
                 return;
             }
 
-            var score = MinimaxEval(board, depthToUse); // If we are black, invert score. Black is winning when negative
-
-            // We hit a retry! We need to go quicker
-            if (needsRetry)
+            moves = GetSortedMoves(board, bestFoundEver);
+            foreach (var move in moves)
             {
-                Console.WriteLine($"Starting retry!");
-                needsRetry = false;
+                // Console.WriteLine("TL Cycle");
+                if (timer.MillisecondsElapsedThisTurn > maxTimeAllowed)
+                {
+                    Console.WriteLine($"Ending at depth {depth} after {timer.MillisecondsElapsedThisTurn}ms");
+                    if (currentBestScore > bestFoundEverScore)
+                    {
+                        Console.WriteLine($"Current itteration best is better despite being incomplete. Going with that!");
+                        bestFoundEver = currentItrBest;
+                        bestFoundEverScore = currentBestScore;
+                        equalToBest = currentEqualToBest;
+                    }
+                    return;
+                }
+
+                board.MakeMove(move);
+
+                // if (move.IsEnPassant)
+                // {
+                //     bestFoundEver = move;
+                //     equalToBest.Clear();
+                //     board.UndoMove(move);
+                //     Console.WriteLine("Holy hell.");
+                //     return;
+                // }
+
+                var score = -MinimaxEval(board, depth);
+                if (score > currentBestScore)
+                {
+                    currentBestScore = score;
+                    currentItrBest = move;
+                    currentEqualToBest.Clear();
+                }
+                else if (score == currentBestScore)
+                {
+                    currentEqualToBest.Add(move);
+                }
+
                 board.UndoMove(move);
-                FindBestWithRetry(board, moves, searchDepth - 2);
-                return;
             }
 
-            var resultScore = score * Mult(me);
-            if (resultScore > bestScore)
-            {
-                bestScore = resultScore;
-                best = move;
-                equalToBest.Clear();
-            }
-            else if (resultScore == bestScore)
-            {
-                equalToBest.Add(move);
-            }
+            bestFoundEver = currentItrBest;
+            bestFoundEverScore = currentBestScore;
+            equalToBest = currentEqualToBest;
 
-            board.UndoMove(move);
+            depth++;
         }
+
     }
 
-    private int MinimaxEval(Board board, int depth = defaultSearchDepth, int alpha = int.MinValue, int beta = int.MaxValue)
+    private int MinimaxEval(Board board, int depth, int alpha = -lVal, int beta = lVal)
     {
-        if (!isOnRetry && timer.MillisecondsElapsedThisTurn > maxTime)
-        {
-            needsRetry = true;
-            isOnRetry = true;
-            Console.WriteLine($"Time limit expired!");
-        }
-        if (needsRetry) return 0;
+        if (timer.MillisecondsElapsedThisTurn > maxTimeAllowed) return 0;
 
-        checks++;
-        if (board.IsInCheckmate()) return -100000 * Mult(board.IsWhiteToMove); // Checkmate and white to move = black won
+        nodes++;
+        if (board.IsInCheckmate()) return -lVal;
         if (board.IsDraw()) return 0;
 
         if (depth == 0)
         {
-            return Evaluate(board);
+            return CheckCaptures(board, alpha, beta);// Evaluate(board);
         }
 
-        var moves = GetSortedMoves(board);
+        var moves = GetSortedMoves(board, Move.NullMove);
         foreach (var move in moves)
         {
             board.MakeMove(move);
-            int moveScore = MinimaxEval(board, depth - 1, alpha, beta);
+            int moveScore = -MinimaxEval(board, depth - 1, -beta, -alpha);
             board.UndoMove(move);
 
-            if (board.IsWhiteToMove) alpha = Math.Max(alpha, moveScore);
-            else beta = Math.Min(beta, moveScore);
-
-            if (beta <= alpha) break;
+            alpha = Math.Max(alpha, moveScore);
+            if (alpha >= beta) break;
         }
 
-        if (board.IsWhiteToMove) return alpha; // White wants highest number
-        else return beta; // Black wants least
+        return alpha;
     }
 
-    private Move[] GetSortedMoves(Board board)
+    private int CheckCaptures(Board board, int alpha, int beta)
+    {
+        int pat = Evaluate(board);
+        if (pat >= beta) return beta;
+        if (alpha < pat) alpha = pat;
+
+        var captures = board.GetLegalMoves(true);
+        // captures.
+        foreach (var capture in captures)
+        {
+            board.MakeMove(capture);
+            int score = -CheckCaptures(board, -beta, -alpha);
+            board.UndoMove(capture);
+
+            if (score >= beta) return beta;
+            if (score > alpha) alpha = score;
+        }
+
+        return alpha;
+    }
+
+    private Move[] GetSortedMoves(Board board, Move forcedFirstMove)
     {
         var moves = board.GetLegalMoves();
-        List<List<Move>> sMoves = new() { new(), new(), new() };
+        List<Tuple<int, Move>> sMoves = new() { };
         foreach (var move in moves)
         {
-            if (move.IsCapture) sMoves[0].Add(move);
-            else if (board.SquareIsAttackedByOpponent(move.TargetSquare)) sMoves[2].Add(move);
-            else sMoves[1].Add(move);
-        }
+            int pVal = 0;
+            if (move.IsCapture) pVal += PieceWorth(move.CapturePieceType);
+            if (move.IsPromotion) pVal += PieceWorth(move.PromotionPieceType);
+            if (move.IsCastles) pVal += 100;
+            if (board.SquareIsAttackedByOpponent(move.TargetSquare)) pVal -= 5;
 
-        return sMoves[0].Concat(sMoves[1]).Concat(sMoves[2]).ToArray();
+            sMoves.Add(new(pVal, move));
+        }
+        sMoves.Sort((a, b) => b.Item1.CompareTo(a.Item1));
+        var arr = sMoves.Select(x => x.Item2);
+
+        if (forcedFirstMove != Move.NullMove) arr.Prepend(forcedFirstMove);
+        return arr.ToArray();
     }
 
-    private int Mult(bool color)
+    private int BoolToMult(bool color)
     {
         return color ? 1 : -1;
     }
 
     public int Evaluate(Board board)
     {
-        var eval = CalculateMaterial(board);
-        if (board.IsInCheck()) eval -= 100 * Mult(board.IsWhiteToMove); // White to move && check = white is in check, so subtract from eval
-
+        var mobilityMult = 1;
+        var eval = CalculateMaterial(board) * BoolToMult(board.IsWhiteToMove);
+        if (board.IsInCheck()) eval -= 50; // Check is bad thing for the person who's current move it is
+        // var mobility = CalculateMobility(board);
+        // eval += mobility * mobilityMult;
         return eval;
     }
 
-    // public int CalculateBoardCoverage(Board board)
-    // {
-    //     // board.GetKingSquare
-    //     for (int i = 0; i < 64; i++)
-    //     {
-    //         var square = new Square(i);
-    //         // board.SquareIsAttackedByOpponent(square);
-    //         
-    //     }
-    // }
+    private int CalculateMobility(Board board)
+    {
+        var moves = board.GetLegalMoves();
+        return moves.Length;
+    }
 
     private int PieceWorth(PieceType type)
     {
-        int[] scores = { 0, 100, 300, 350, 500, 900, 10000 };
+        int[] scores = { 0, 100, 320, 330, 500, 900, 10000 };
         return scores[(int)type];
+    }
+
+    // private int PiecePosScore(Piece piece)
+    // {
+    //     if (piece.PieceType == PieceType.Pawn) return (piece.IsWhite ? piece.Square.Rank : 7 - piece.Square.Rank) * 2;
+    //     if (piece.PieceType == PieceType.King) return 0;
+    //     // Distance from center
+    //     var rankDist = Math.Abs(piece.Square.Rank - 4);
+    //     var fileDist = Math.Abs(piece.Square.File - 4);
+    // 
+    //     return 5 - (rankDist + fileDist);
+    // }
+    static int PiecePosScore(Piece piece, bool kingEnd = false)
+    {
+        ulong[] values = { 231520005970560296, 371413138147804744, 376235690637563454, 587905079315048590, 448258289281955402, 876384074027600299, 448259453218158153, 948441732506814890, 452761880320570952, 952945332135234216, 457549218373334601, 889894855731940006, 340172791585601081, 614891522810808458, 344109996662162728, 326394734067484232 };
+        int file = piece.Square.File;
+        int rank = piece.Square.Rank;
+        if (file > 3) file = 7 - file;
+        if (piece.IsWhite) rank = 7 - rank;
+
+        var index = file + rank * 4;
+        var offset = ((int)piece.PieceType - 1) * 4 + (index % 2 * 32) + (kingEnd && piece.PieceType == PieceType.King ? 4 : 0);
+        // Console.WriteLine($"Rank: {rank}, File: {file}, Index: {index}   Type Offset: {((int)type - 1) * 4}  Index Sub Offset: {(index % 2 * 32)} King End Offset: {(kingEnd ? 4 : 0)}  --  {values[index / 2] & (mask << offset)}");
+        int result = (int)((values[index / 2] >> offset) & 0b1111);
+        return result - 8;
+    }
+
+    private int CalculateEGScore(Board board)
+    {
+        var lists = board.GetAllPieceLists();
+        int[] endGameMults = { 0, 0, 2, 2, 1, 3, 0 };
+        int egScore = 0;
+
+        for (int i = 0; i < lists.Length; i++)
+        {
+            var list = lists[i];
+            egScore += endGameMults[(int)list.TypeOfPieceInList] * list.Count;
+        }
+
+        return egScore;
     }
 
     public int CalculateMaterial(Board board)
     {
         int eval = 0;
-        foreach (var list in board.GetAllPieceLists())
+        var lists = board.GetAllPieceLists();
+        int[] endGameMults = { 0, 0, 2, 2, 3, 4, 0 };
+        int egScore = 0;
+
+        foreach (var list in lists)
         {
-            eval += PieceWorth(list.TypeOfPieceInList) * list.Count * (list.IsWhitePieceList == true ? 1 : -1);
+            eval += PieceWorth(list.TypeOfPieceInList) * list.Count * BoolToMult(list.IsWhitePieceList);
+            foreach (var piece in list) eval += PiecePosScore(piece) * BoolToMult(list.IsWhitePieceList);
+            egScore += endGameMults[(int)list.TypeOfPieceInList] * list.Count;
         }
 
         return eval;
