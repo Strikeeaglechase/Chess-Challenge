@@ -10,218 +10,247 @@ namespace ChessChallenge.Example
     // Plays randomly otherwise.
     public class EvilBot : IChessBot
     {
-        private bool me;
         private int nodes;
-        private Random rng;
-        private Timer timer;
+        private int qNodes;
+
+        private int currentSearchDepth;
+        private int maxSearchTimeAllowed;
+
+        private List<Move> bestMovesFound = new();
+        private int bestMoveScore;
+
+        List<Move> bestMovesFoundThisItr = new();
+        int bestScoreThisItr = -lVal;
 
         private const int lVal = 100000;
 
-        private List<Move> workingEqualToBest;
-        private Move best;
-        private int bestScore;
+        private Board board;
+        private Timer timer;
 
-        private Move bestFoundEver;
-        private List<Move> equalToBest = new();
+        private Random rng;
 
-        private int maxTimeAllowed;
+        private const byte TT_INVALID = 0, TT_EXACT = 1, TT_LOWERBOUND = 2, TT_UPPERBOUND = 3;
+        struct Transposition
+        {
+            public ulong zorbristKey;
+            public Move move;
+            public int evaluation;
+            public sbyte depth;
+            public byte flag;
+        };
+
+        Transposition[] ttable;
+        ulong ttableMask = 0x7FFFFF;
+
+        // Tyrant's Pesto implementation:
+        readonly int[] phaseMults = { 0, 1, 1, 2, 4, 0 };
+        private short[] pieceValueMap = { 100, 310, 320, 500, 1001, 20000, 110, 300, 310, 500, 1001, 20000 };
+        private decimal[] compressedPesto = {
+        63746705523041458768562654720m, 71818693703096985528394040064m, 75532537544690978830456252672m, 75536154932036771593352371712m, 76774085526445040292133284352m, 3110608541636285947269332480m, 936945638387574698250991104m, 75531285965747665584902616832m,
+        77047302762000299964198997571m, 3730792265775293618620982364m, 3121489077029470166123295018m, 3747712412930601838683035969m, 3763381335243474116535455791m, 8067176012614548496052660822m, 4977175895537975520060507415m, 2475894077091727551177487608m,
+        2458978764687427073924784380m, 3718684080556872886692423941m, 4959037324412353051075877138m, 3135972447545098299460234261m, 4371494653131335197311645996m, 9624249097030609585804826662m, 9301461106541282841985626641m, 2793818196182115168911564530m,
+        77683174186957799541255830262m, 4660418590176711545920359433m, 4971145620211324499469864196m, 5608211711321183125202150414m, 5617883191736004891949734160m, 7150801075091790966455611144m, 5619082524459738931006868492m, 649197923531967450704711664m,
+        75809334407291469990832437230m, 78322691297526401047122740223m, 4348529951871323093202439165m, 4990460191572192980035045640m, 5597312470813537077508379404m, 4980755617409140165251173636m, 1890741055734852330174483975m, 76772801025035254361275759599m,
+        75502243563200070682362835182m, 78896921543467230670583692029m, 2489164206166677455700101373m, 4338830174078735659125311481m, 4960199192571758553533648130m, 3420013420025511569771334658m, 1557077491473974933188251927m, 77376040767919248347203368440m,
+        73949978050619586491881614568m, 77043619187199676893167803647m, 1212557245150259869494540530m, 3081561358716686153294085872m, 3392217589357453836837847030m, 1219782446916489227407330320m, 78580145051212187267589731866m, 75798434925965430405537592305m,
+        68369566912511282590874449920m, 72396532057599326246617936384m, 75186737388538008131054524416m, 77027917484951889231108827392m, 73655004947793353634062267392m, 76417372019396591550492896512m, 74568981255592060493492515584m, 70529879645288096380279255040m,
+    };
+
+        private int[][] pieceTable;
 
         public EvilBot()
         {
-            Logger.Init();
-            rng = new Random();
+            rng = new Random(1776);
+            ttable = new Transposition[ttableMask + 1];
+
+            pieceTable = new int[64][];
+            for (int i = 0; i < 64; i++)
+            {
+                int pieceType = 0;
+                pieceTable[i] = decimal.GetBits(compressedPesto[i]).Take(3).SelectMany(c => BitConverter.GetBytes(c).Select((byte square) => (int)((sbyte)square * 1.461) + pieceValueMap[pieceType++])).ToArray();
+            }
         }
 
-        public Move Think(Board board, Timer timer)
+        private void Reset()
         {
-            if (board.PlyCount == 0) return new Move("e2e4", board);
-            if (board.PlyCount == 1) return new Move("d7d5", board);
-
-            Console.WriteLine($"EG Score: {CalculateEGScore(board)}");
-            // foreach (var list in board.GetAllPieceLists())
-            // {
-            //     foreach (var piece in list)
-            //     {
-            //         var pst = PiecePosScore(piece);
-            //         Console.WriteLine($"{piece.Square} {piece.PieceType} {pst}");
-            //     }
-            // }
-
             nodes = 0;
-            me = board.IsWhiteToMove;
-            this.timer = timer;
+            qNodes = 0;
+            currentSearchDepth = 1;
+            bestMovesFound.Clear();
+            bestMoveScore = -lVal;
+        }
 
-            Move[] moves = board.GetLegalMoves();
+        private void UpdateAllowedTime()
+        {
+            var div = 30;
+            var left = timer.MillisecondsRemaining - 5000;
+            if (left < 30000) div = 15;
+            if (left < 15000) div = 10;
 
-            FindBestIter(board, moves);
+            maxSearchTimeAllowed = Math.Max(50, left / div);
+            Console.WriteLine($"Going to spend {maxSearchTimeAllowed}ms thinking");
+        }
 
-            if (equalToBest.Count > 0) bestFoundEver = equalToBest[rng.Next(equalToBest.Count)];
+        public Move Think(Board in_board, Timer in_timer)
+        {
+            if (in_board.PlyCount == 0) return new Move("e2e4", in_board);
+            if (in_board.PlyCount == 1) return new Move("d7d5", in_board);
 
-            if (bestFoundEver == Move.NullMove)
+            board = in_board;
+            timer = in_timer;
+
+            Reset();
+            UpdateAllowedTime();
+            FindBestIter();
+
+
+            return Best();
+        }
+
+        private Move Best()
+        {
+            if (bestMovesFound.Count == 0)
             {
-                bestFoundEver = moves[rng.Next(moves.Length)];
-                Console.WriteLine($"Was forced to use pure random move! Best found ever is null!");
+                Console.WriteLine($"No good moves found?");
+                if (bestMovesFoundThisItr.Count > 0) return bestMovesFoundThisItr[0];
+
+                var validMoves = board.GetLegalMoves();
+                return validMoves[rng.Next(validMoves.Length)];
             }
 
+            var options = bestMovesFound.Count;
+            var chosen = bestMovesFound[rng.Next(options)];
+            Console.WriteLine($"Search over at depth {currentSearchDepth - 1}. Best eval: {bestMoveScore}, move options: {options}, playing: {chosen}. Spent: {timer.MillisecondsElapsedThisTurn}");
 
-            Console.WriteLine($"Eval: {bestScore}. Number of node searched: {nodes}. Spent: {timer.MillisecondsElapsedThisTurn}ms");
-
-            return bestFoundEver;
+            return chosen;
         }
 
-        private void FindBestIter(Board board, Move[] moves)
+        private void FindBestIter()
         {
-            int depth = 1;
-            int bufferTime = 5000; // Save 5 seconds of time, this just helps prevent timeouts near endgames
-            int tLeft = timer.MillisecondsRemaining - bufferTime;
-            int div = 30;
-            if (tLeft < 30000) div = 15;
-            if (tLeft < 15000) div = 10;
-
-            maxTimeAllowed = Math.Max(tLeft / div, 50);
-
+            var moves = GetSortedMoves();
+            bool earlyExit = false;
             while (true)
             {
-                bestScore = -100000;
-                best = Move.NullMove;
-                workingEqualToBest = new List<Move>();
+                if (timer.MillisecondsElapsedThisTurn > maxSearchTimeAllowed) return;
 
-                // If we have less than 50% of our time left, no point even trying another cycle. We won't have time for it
-                float precTimeLeft = ((float)maxTimeAllowed - timer.MillisecondsElapsedThisTurn) / maxTimeAllowed;
-                if (precTimeLeft < 0.5f)
-                {
-                    // Console.WriteLine($"PrecTimeLeft: {precTimeLeft}. Allowed: {maxTimeAllowed}, used: {timer.MillisecondsElapsedThisTurn}");
-                    Console.WriteLine($"Ending at depth {depth} after {timer.MillisecondsElapsedThisTurn}ms");
-                    if (bestFoundEver == Move.NullMove) bestFoundEver = best;
-                    return;
-                }
+                // float minPrec = maxSearchTimeAllowed * 0.4f;
+                // if (timer.MillisecondsElapsedThisTurn > minPrec)
+                // {
+                //     Console.WriteLine($"Less than 40% time remaining, not starting next search. Needed {minPrec} to continue");
+                //     return;
+                // }
+
+                bestMovesFoundThisItr = new();
+                bestScoreThisItr = -lVal;
 
                 foreach (var move in moves)
                 {
-                    if (timer.MillisecondsElapsedThisTurn > maxTimeAllowed)
-                    {
-                        Console.WriteLine($"Ending at depth {depth} after {timer.MillisecondsElapsedThisTurn}ms");
-                        if (bestFoundEver == Move.NullMove) bestFoundEver = best;
-                        return;
-                    }
-
                     board.MakeMove(move);
-
-                    if (move.IsEnPassant)
-                    {
-                        bestFoundEver = move;
-                        equalToBest.Clear();
-                        board.UndoMove(move);
-                        Console.WriteLine("Holy hell.");
-                        return;
-                    }
-                    var score = -MinimaxEval(board, depth);
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        best = move;
-                        workingEqualToBest.Clear();
-                    }
-                    else if (score == bestScore)
-                    {
-                        workingEqualToBest.Add(move);
-                    }
-
+                    var moveScore = -Negamax(currentSearchDepth);
                     board.UndoMove(move);
+
+                    // If we exited negamax due to time, break out.
+                    if (timer.MillisecondsElapsedThisTurn > maxSearchTimeAllowed) { earlyExit = true; break; }
+
+                    if (moveScore > bestScoreThisItr)
+                    {
+                        bestScoreThisItr = moveScore;
+                        bestMovesFoundThisItr.Clear();
+                        bestMovesFoundThisItr.Add(move);
+                    }
+                    else if (moveScore == bestScoreThisItr)
+                    {
+                        bestMovesFoundThisItr.Add(move);
+                    }
+
                 }
 
-                bestFoundEver = best;
-                equalToBest = workingEqualToBest;
+                if (!earlyExit || bestScoreThisItr > bestMoveScore)
+                {
+                    bestMoveScore = bestScoreThisItr;
+                    bestMovesFound = bestMovesFoundThisItr;
+                    if (earlyExit) Console.WriteLine($"Found better move with partial itteration!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    Console.WriteLine($"At depth {currentSearchDepth} found best move with score {bestMoveScore} ({bestMovesFound.Count} options) (Nodes: {nodes}, QNodes: {qNodes}) Time: {timer.MillisecondsElapsedThisTurn}ms");
+                }
+                else
+                {
+                    Console.WriteLine($"Ended early in {currentSearchDepth}, was unable to find better in allowed time. (Nodes: {nodes}, QNodes: {qNodes}) Time: {timer.MillisecondsElapsedThisTurn}ms");
+                }
 
-                depth++;
+                currentSearchDepth++;
             }
-
         }
 
-        // private void FindBestWithRetry(Board board, Move[] moves, int depthToUse)
-        // {
-        //     bestScore = -100000;
-        //     best = Move.NullMove;
-        //     workingEqualToBest = new List<Move>();
-        // 
-        //     foreach (var move in moves)
-        //     {
-        //         board.MakeMove(move);
-        // 
-        //         if (move.IsEnPassant)
-        //         {
-        //             best = move;
-        //             workingEqualToBest.Clear();
-        //             Console.WriteLine("Holy hell.");
-        //             return;
-        //         }
-        // 
-        //         var score = MinimaxEval(board, depthToUse); // If we are black, invert score. Black is winning when negative
-        // 
-        //         // We hit a retry! We need to go quicker
-        //         if (needsRetry)
-        //         {
-        //             Console.WriteLine($"Starting retry!");
-        //             needsRetry = false;
-        //             board.UndoMove(move);
-        //             FindBestWithRetry(board, moves, searchDepth - 2);
-        //             return;
-        //         }
-        // 
-        //         var resultScore = score * Mult(me);
-        //         if (resultScore > bestScore)
-        //         {
-        //             bestScore = resultScore;
-        //             best = move;
-        //             workingEqualToBest.Clear();
-        //         }
-        //         else if (resultScore == bestScore)
-        //         {
-        //             workingEqualToBest.Add(move);
-        //         }
-        // 
-        //         board.UndoMove(move);
-        //     }
-        // }
-
-        private int MinimaxEval(Board board, int depth, int alpha = -lVal, int beta = lVal)
+        private int Negamax(int depth, int ply = 1, int alpha = -lVal, int beta = lVal)
         {
-            if (timer.MillisecondsElapsedThisTurn > maxTimeAllowed) return 0;
-
+            if (timer.MillisecondsElapsedThisTurn > maxSearchTimeAllowed) return 0;
             nodes++;
-            if (board.IsInCheckmate()) return -lVal;
+
+            if (board.IsInCheckmate()) return -lVal + ply;
             if (board.IsDraw()) return 0;
 
             if (depth == 0)
             {
-                return CheckCaptures(board, alpha, beta);// Evaluate(board);
+                return QSearch(alpha, beta);
             }
 
-            var moves = GetSortedMoves(board);
+            int startAlpha = alpha;
+
+            ref Transposition transposition = ref ttable[board.ZobristKey & ttableMask];
+            if (transposition.zorbristKey == board.ZobristKey && transposition.flag != TT_INVALID && transposition.depth >= depth)
+            {
+                int eval = transposition.evaluation;
+                if (transposition.flag == TT_EXACT) return eval;
+                else if (transposition.flag == TT_LOWERBOUND && eval >= beta) return eval;// alpha = Math.Max(alpha, transposition.evaluation);
+                else if (transposition.flag == TT_UPPERBOUND && eval <= alpha) return eval;// beta = Math.Min(beta, transposition.evaluation);
+                                                                                           // if (alpha >= beta) return transposition.evaluation;
+            }
+
+            var moves = GetSortedMoves();
+            var bestMove = Move.NullMove;
+            int bestEval = -lVal;
+
             foreach (var move in moves)
             {
                 board.MakeMove(move);
-                int moveScore = -MinimaxEval(board, depth - 1, -beta, -alpha);
+                int moveScore = -Negamax(depth - 1, ply + 1, -beta, -alpha);
                 board.UndoMove(move);
 
-                alpha = Math.Max(alpha, moveScore);
-                if (alpha >= beta) break;
+                if (moveScore > bestEval)
+                {
+                    bestEval = moveScore;
+                    bestMove = move;
+                    alpha = Math.Max(bestEval, alpha);
+                    if (alpha >= beta) break;
+                }
             }
 
-            return alpha;
+
+            transposition.evaluation = bestEval;
+            transposition.zorbristKey = board.ZobristKey;
+            transposition.move = bestMove;
+            if (bestEval <= startAlpha) transposition.flag = TT_UPPERBOUND;
+            else if (bestEval >= beta) transposition.flag = TT_LOWERBOUND;
+            else transposition.flag = TT_EXACT;
+            transposition.depth = (sbyte)depth;
+
+            return bestEval;
         }
 
-        private int CheckCaptures(Board board, int alpha, int beta)
+        private int QSearch(int alpha, int beta)
         {
-            int pat = Evaluate(board);
+            qNodes++;
+            int pat = EvalMaterialAndPST();
             if (pat >= beta) return beta;
+
             if (alpha < pat) alpha = pat;
 
-            var captures = board.GetLegalMoves(true);
+            var captures = GetSortedMoves(true);
+            // captures.
             foreach (var capture in captures)
             {
                 board.MakeMove(capture);
-                int score = -CheckCaptures(board, -beta, -alpha);
+                int score = -QSearch(-beta, -alpha);
                 board.UndoMove(capture);
 
                 if (score >= beta) return beta;
@@ -231,116 +260,56 @@ namespace ChessChallenge.Example
             return alpha;
         }
 
-        private Move[] GetSortedMoves(Board board)
-        {
-            var moves = board.GetLegalMoves();
-            List<List<Move>> sMoves = new() { new(), new(), new() };
-            foreach (var move in moves)
-            {
-                if (move.IsCapture) sMoves[0].Add(move);
-                else if (board.SquareIsAttackedByOpponent(move.TargetSquare)) sMoves[2].Add(move);
-                else sMoves[1].Add(move);
-            }
 
-            return sMoves[0].Concat(sMoves[1]).Concat(sMoves[2]).ToArray();
+        private Move[] GetSortedMoves(bool onlyCapture = false)
+        {
+            var tEntry = ttable[board.ZobristKey & ttableMask];
+            var moves = board.GetLegalMoves(onlyCapture);
+            var evals = moves.Select(m => EvalMove(m, tEntry));
+            Array.Sort(evals.ToArray(), moves);
+            Array.Reverse(moves);
+            return moves;
         }
 
-        private int BoolToMult(bool color)
+        private int EvalMove(Move move, Transposition tEntry)
         {
-            return color ? 1 : -1;
-        }
+            int eval = 0;
+            if (tEntry.zorbristKey == board.ZobristKey && move == tEntry.move) return 1000;
+            if (move.IsCastles) eval += 10;
+            if (move.IsPromotion) eval += 50;
+            if (move.IsCapture) eval += 10 * (int)move.CapturePieceType - (int)move.MovePieceType;
+            if (board.SquareIsAttackedByOpponent(move.TargetSquare)) eval -= 5;
 
-        public int Evaluate(Board board)
-        {
-            var mobilityMult = 1;
-            var eval = CalculateMaterial(board) * BoolToMult(board.IsWhiteToMove);
-            if (board.IsInCheck()) eval -= 50; // Check is bad thing for the person who's current move it is
-            var mobility = CalculateMobility(board);
-            eval += mobility * mobilityMult;
             return eval;
         }
 
-        private int CalculateMobility(Board board)
+        private int BoolToMult(bool color) => color ? 1 : -1;
+
+        private int EvalMaterialAndPST()
         {
-            var moves = board.GetLegalMoves();
-            return moves.Length;
-        }
-
-        private int PieceWorth(PieceType type)
-        {
-            int[] scores = { 0, 100, 300, 350, 500, 900, 10000 };
-            return scores[(int)type];
-        }
-
-        private enum ScoreType { Pawn, Knight, Bishop, Rook, Queen, King, KingEndgame, KingHunt };
-
-        //Assuming you put your packed data table into a table called packedScores.
-        private int GetPieceBonusScore(ScoreType type, bool isWhite, int rank, int file)
-        {
-            ulong[,] kPackedScores =
-       {
-        {0x31CDE1EBFFEBCE00, 0x31D7D7F5FFF5D800, 0x31E1D7F5FFF5E200, 0x31EBCDFAFFF5E200},
-        {0x31E1E1F604F5D80A, 0x13EBD80009FFEC0A, 0x13F5D8000A000014, 0x13FFCE000A00001E},
-        {0x31E1E1F5FAF5E232, 0x13F5D80000000032, 0x0013D80500050A32, 0x001DCE05000A0F32},
-        {0x31E1E1FAFAF5E205, 0x13F5D80000050505, 0x001DD80500050F0A, 0xEC27CE05000A1419},
-        {0x31E1EBFFFAF5E200, 0x13F5E20000000000, 0x001DE205000A0F00, 0xEC27D805000A1414},
-        {0x31E1F5F5FAF5E205, 0x13F5EC05000A04FB, 0x0013EC05000A09F6, 0x001DEC05000A0F00},
-        {0x31E213F5FAF5D805, 0x13E214000004EC0A, 0x140000050000000A, 0x14000000000004EC},
-        {0x31CE13EBFFEBCE00, 0x31E21DF5FFF5D800, 0x31E209F5FFF5E200, 0x31E1FFFB04F5E200},
-    };
-
-            //Because the arrays are 8x4, we need to mirror across the files.
-            if (file > 3) file = 7 - file;
-            //Additionally, if we're checking black pieces, we need to flip the board vertically.
-            if (!isWhite) rank = 7 - rank;
-            int unpackedData = 0;
-            ulong bytemask = 0xFF;
-            //first we shift the mask to select the correct byte              ↓
-            //We then bitwise-and it with PackedScores            ↓
-            //We finally have to "un-shift" the resulting data to properly convert back       ↓
-            //We convert the result to an sbyte, then to an int, to ensure it converts properly.
-            unpackedData = (int)(sbyte)((kPackedScores[rank, file] & (bytemask << (int)type)) >> (int)type);
-            //inverting eval scores for black pieces
-            if (!isWhite) unpackedData *= -1;
-            return unpackedData;
-        }
-
-
-        private int PiecePosScore(Piece piece)
-        {
-            var st = (ScoreType)((int)piece.PieceType - 1);
-            return GetPieceBonusScore(st, piece.IsWhite, piece.Square.Rank, piece.Square.File) / 10;
-        }
-
-        private int CalculateEGScore(Board board)
-        {
-            var lists = board.GetAllPieceLists();
-            int[] endGameMults = { 0, 0, 2, 2, 1, 3, 0 };
-            int egScore = 0;
-
-            for (int i = 0; i < lists.Length; i++)
+            int midgame = 0, endgame = 0, phase = 0;
+            foreach (var list in board.GetAllPieceLists())
             {
-                var list = lists[i];
-                egScore += endGameMults[(int)list.TypeOfPieceInList] * list.Count;
+                foreach (var piece in list)
+                {
+                    var squareIndex = piece.Square.Index ^ (list.IsWhitePieceList ? 56 : 0);
+                    var pieceType = (int)list.TypeOfPieceInList - 1;
+                    var mult = BoolToMult(list.IsWhitePieceList);
+                    midgame += pieceTable[squareIndex][pieceType] * mult;
+                    endgame += pieceTable[squareIndex][pieceType + 6] * mult;
+                    phase += phaseMults[pieceType];
+                }
             }
-
-            return egScore;
+            phase = Math.Min(phase, 24);
+            return (midgame * phase + endgame * (24 - phase)) / 24 * BoolToMult(board.IsWhiteToMove);
         }
 
-        public int CalculateMaterial(Board board)
+
+        public int Evaluate()
         {
-            int eval = 0;
-            var lists = board.GetAllPieceLists();
-            int[] endGameMults = { 0, 0, 2, 2, 3, 4, 0 };
-            int egScore = 0;
-
-            foreach (var list in lists)
-            {
-                eval += PieceWorth(list.TypeOfPieceInList) * list.Count * BoolToMult(list.IsWhitePieceList);
-                // foreach (var piece in list) eval += PiecePosScore(piece);
-                egScore += endGameMults[(int)list.TypeOfPieceInList] * list.Count;
-            }
-
+            var eval = EvalMaterialAndPST();
+            if (board.IsInCheck()) eval -= 50; // Check is bad thing for the person who's current move it is
+            eval += board.GetLegalMoves().Length;
             return eval;
         }
     }

@@ -1,179 +1,251 @@
-﻿using ChessChallenge.API;
+﻿// #define UCI
+
+// #define TESTING
+// #define SLOW
+
+using ChessChallenge.API;
 using System;
+using System.Linq;
 using System.Numerics;
 using System.Collections.Generic;
-using System.Linq;
 
-namespace ChessChallenge.Example
+public class StrongBot : IChessBot
 {
-    public class StrongBot : IChessBot
+    // Define globals to save tokens
+    readonly int CHECKMATE = 100000;
+    Board board;
+    Timer timer;
+    int time_limit;
+    Move depth_move;
+
+#if UCI
+    long nodes;
+#endif
+
+    // TT Entry Definition
+    record struct Entry(ulong Key, int Score, sbyte Depth, byte Flag, Move Move);
+    // TT Definition
+    const ulong TT_ENTRIES = 0x7FFFFF;
+    Entry[] tt = new Entry[TT_ENTRIES];
+
+    // Required Think Method
+    public Move Think(Board _board, Timer _timer)
     {
-        int CHECKMATE = 100000;
-        static Board board;
-        Timer timer;
-        int time_limit = 0;
-        DateTime start = DateTime.Now;
-        Move depth_move = new Move();
-        Int64 nodes = 0;
-
-        public Move Think(Board board_input, Timer timer_input)
+        board = _board;
+        timer = _timer;
+        time_limit = timer.MillisecondsRemaining / 40;
+#if SLOW
+        time_limit = timer.MillisecondsRemaining / 2;
+#endif
+#if TESTING
+        time_limit = timer.MillisecondsRemaining / 2000;
+#endif
+#if UCI
+        nodes = 0;
+#endif
+        Move best_move = Move.NullMove;
+        // Iterative Deepening Loop
+        for (int depth = 1; depth < 100; depth++)
         {
-            board = board_input;
-            timer = timer_input;
-            return Iterative_Deepening();
+            int score = Negamax(depth, 0, -CHECKMATE, CHECKMATE);
+
+            // Check if time is expired
+            if (timer.MillisecondsElapsedThisTurn > time_limit)
+                break;
+
+            best_move = depth_move;
+#if UCI
+            // UCI Debug Logging
+            Console.WriteLine("depth {0,2} score {1,6} nodes {2,9} nps {3,8} time {4,5} pv {5}{6}",
+                depth,
+                score,
+                nodes,
+                1000 * nodes / (timer.MillisecondsElapsedThisTurn + 1),
+                timer.MillisecondsElapsedThisTurn,
+                best_move.StartSquare.Name,
+                best_move.TargetSquare.Name
+            );
+#endif
+
+            // If a checkmate is found, exit search early to save time
+            if (score > CHECKMATE / 2)
+                break;
+        }
+#if UCI
+        Console.WriteLine();
+#endif
+
+        return best_move;
+    }
+
+    private int Negamax(int depth, int ply, int alpha, int beta)
+    {
+        // Increment node counter
+#if UCI
+        nodes++;
+#endif
+        // Define search variables
+        bool root = ply == 0;
+        bool q_search = depth <= 0;
+        int best_score = -CHECKMATE;
+        ulong key = board.ZobristKey;
+
+        // Check for draw by repetition
+        if (!root && board.IsRepeatedPosition()) return -20;
+
+        // TT Pruning
+        Entry tt_entry = tt[key % TT_ENTRIES];
+        if (tt_entry.Key == key && !root && tt_entry.Depth >= depth && (
+                tt_entry.Flag == 1 ||
+                (tt_entry.Flag == 0 && tt_entry.Score <= alpha) ||
+                (tt_entry.Flag == 2 && tt_entry.Score >= beta)))
+            return tt_entry.Score;
+
+        // Delta Pruning
+        if (q_search)
+        {
+            best_score = Eval();
+            if (best_score >= beta) return beta;
+            alpha = Math.Max(alpha, best_score);
+        }
+        else if (beta - alpha == 1 && !board.IsInCheck())
+        {
+            // Static Eval Calculation for Pruning
+            int static_eval = Eval();
+            // Static Move Pruning
+            if (static_eval - 85 * depth >= beta) return static_eval - 85 * depth;
         }
 
-        public Move Iterative_Deepening()
+        Move[] moves = board.GetLegalMoves(q_search && !board.IsInCheck());
+        // Move Ordering
+        int[] move_scores = new int[moves.Length];
+        for (int i = 0; i < moves.Length; i++)
         {
-            time_limit = timer.MillisecondsRemaining / 40;
-            start = DateTime.Now;
-            nodes = 0;
+            // TT-Move + MVV-LVA
+            move_scores[i] = moves[i] == tt_entry.Move ? 100000 :
+            moves[i].IsCapture ? 100 * (int)moves[i].CapturePieceType - (int)moves[i].MovePieceType :
+            moves[i].IsPromotion ? (int)moves[i].PromotionPieceType : 0;
+        }
 
-            Move[] moves = board.GetLegalMoves();
-            Move best_move = moves[0];
+        Move best_move = Move.NullMove;
+        int start_alpha = alpha;
+        for (int i = 0; i < moves.Length; i++)
+        {
+            // Check if time is expired
+            if (timer.MillisecondsElapsedThisTurn > time_limit) return 0;
 
-            for (int depth = 1; depth < 100; depth++)
+            // Sort moves in one-iteration bubble sort
+            for (int j = i + 1; j < moves.Length; j++)
+                if (move_scores[i] < move_scores[j])
+                    (moves[i], moves[j], move_scores[i], move_scores[j]) =
+                    (moves[j], moves[i], move_scores[j], move_scores[i]);
+
+            Move move = moves[i];
+            board.MakeMove(move);
+            // Principal variation search with null-window search
+            int new_score = -Negamax(depth - 1, ply + 1, (q_search || i == 0) ? -beta : -alpha - 1, -alpha);
+            if (!q_search && i != 0 && new_score > alpha)
+                new_score = -Negamax(depth - 1, ply + 1, -beta, -new_score);
+            board.UndoMove(move);
+
+            if (new_score > best_score)
             {
-                depth_move = moves[0];
-                int score = Negamax(depth, 0, -CHECKMATE, CHECKMATE);
+                best_score = new_score;
+                best_move = move;
 
-                if ((DateTime.Now - start).TotalMilliseconds > time_limit)
-                    break;
-
-                best_move = depth_move;
-
-                Console.WriteLine(String.Format("depth {0} score {1} nodes {2} nps {3} time {4} pv {5}{6}",
-                    depth,
-                    score,
-                    nodes,
-                    (Int64)(1000 * nodes / (DateTime.Now - start).TotalMilliseconds),
-                    (int)(DateTime.Now - start).TotalMilliseconds,
-                    best_move.StartSquare.Name,
-                    best_move.TargetSquare.Name));
-
-                if (score > CHECKMATE / 2)
-                    break;
+                // Update bestmove
+                if (root) depth_move = move;
+                // Improve alpha
+                alpha = Math.Max(alpha, best_score);
+                // Beta Cutoff
+                if (alpha >= beta) break;
             }
-            Console.WriteLine();
-
-            return best_move;
         }
 
-        public int Negamax(int depth, int ply, int alpha, int beta)
-        {
-            nodes++;
+        // If there are no moves return either checkmate or draw
+        if (!q_search && moves.Length == 0) return board.IsInCheck() ? -CHECKMATE + ply : 0;
 
-            if ((DateTime.Now - start).TotalMilliseconds > time_limit) return 0;
-            if (board.IsInCheckmate()) return -CHECKMATE + ply;
-            if (board.IsDraw()) return 0;
-            if (depth <= 0) return Q_Search(ply, 0, alpha, beta);
+        // Save position to transposition table
+        tt[key % TT_ENTRIES] = new Entry(
+            key,
+            best_score,
+            (sbyte)depth,
+            (byte)(best_score >= beta ? 2 : best_score > start_alpha ? 1 : 0),
+            best_move
+        );
 
-            System.Span<Move> moves = stackalloc Move[256];
-            board.GetLegalMovesNonAlloc(ref moves);
-            foreach (Move move in moves)
-            {
-                board.MakeMove(move);
-                int new_score = -Negamax(depth - 1, ply + 1, -beta, -alpha);
-                board.UndoMove(move);
+        return best_score;
+    }
 
-                if (new_score > alpha)
-                {
-                    if (ply == 0) depth_move = move;
-                    if (new_score >= beta) return beta;
-                    alpha = new_score;
-                }
-            }
-
-            return alpha;
-        }
-
-        public int Q_Search(int depth, int ply, int alpha, int beta)
-        {
-            nodes++;
-
-            if ((DateTime.Now - start).TotalMilliseconds > time_limit) return 0;
-            if (board.IsInCheckmate()) return -CHECKMATE + ply;
-            if (board.IsDraw()) return 0;
-            if (depth <= 0) return Eval();
-
-            // Delta Pruning
-            int eval = Eval();
-            if (eval >= beta) return beta;
-            if (eval > alpha) alpha = eval;
-
-            System.Span<Move> moves = stackalloc Move[256];
-            board.GetLegalMovesNonAlloc(ref moves, true);
-            foreach (Move move in moves)
-            {
-                board.MakeMove(move);
-                int new_score = -Q_Search(depth - 1, ply + 1, -beta, -alpha);
-                board.UndoMove(move);
-
-                if (new_score >= beta) return beta;
-                alpha = Math.Max(alpha, new_score);
-            }
-
-            return alpha;
-        }
-
-        // Piece values: null, pawn, knight, bishop, rook, queen, king
-        int[] pvm_mg = { 0, 100, 320, 330, 500, 1000, 20000 };
-        int[] pvm_eg = { 0, 100, 320, 330, 500, 1000, 20000 };
-
-        // thanks for the pst implementation https://github.com/iudwgerte
-        static int[] edge_dist = { 0, 1, 2, 3, 3, 2, 1, 0 };
-
-        // functions that attempt to simulate a piece square table
-        private static Func<Square, int>[] pst_mg = {
-        sq => 0,                                                                //null
-        sq => sq.Rank*10-10+(sq.Rank==1&&edge_dist[sq.File]!=3?40:0)+(edge_dist[sq.Rank]==3&&edge_dist[sq.File]==3?10:0),   //pawn
-        sq => (edge_dist[sq.Rank]+edge_dist[sq.File])*10,                       //knight
-        sq => pst_mg[2](sq),                                                    //bishop
-        sq => sq.Rank==6?10:0+((sq.Rank==0&&edge_dist[sq.File]==3)?10:0),       //rook
-        sq => (edge_dist[sq.Rank]+edge_dist[sq.File])*5,                        //queen
-        sq => (3-edge_dist[sq.Rank]+3-edge_dist[sq.File])*10-5-(sq.Rank>1?50:0) //king
+    // PeSTO Evaluation Function
+    readonly int[] phase_weight = { 0, 1, 1, 2, 4, 0 };
+    // thanks for the compressed pst implementation Tyrant
+    // None, Pawn, Knight, Bishop, Rook, Queen, King 
+    private readonly short[] pvm = { 82, 337, 365, 477, 1025, 20000, // Middlegame
+                                     94, 281, 297, 512, 936, 20000}; // Endgame
+    // Big table packed with data from premade piece square tables
+    // Unpack using PackedEvaluationTables[set, rank] = file
+    private readonly decimal[] PackedPestoTables = {
+        63746705523041458768562654720m, 71818693703096985528394040064m, 75532537544690978830456252672m, 75536154932036771593352371712m, 76774085526445040292133284352m, 3110608541636285947269332480m, 936945638387574698250991104m, 75531285965747665584902616832m,
+        77047302762000299964198997571m, 3730792265775293618620982364m, 3121489077029470166123295018m, 3747712412930601838683035969m, 3763381335243474116535455791m, 8067176012614548496052660822m, 4977175895537975520060507415m, 2475894077091727551177487608m,
+        2458978764687427073924784380m, 3718684080556872886692423941m, 4959037324412353051075877138m, 3135972447545098299460234261m, 4371494653131335197311645996m, 9624249097030609585804826662m, 9301461106541282841985626641m, 2793818196182115168911564530m,
+        77683174186957799541255830262m, 4660418590176711545920359433m, 4971145620211324499469864196m, 5608211711321183125202150414m, 5617883191736004891949734160m, 7150801075091790966455611144m, 5619082524459738931006868492m, 649197923531967450704711664m,
+        75809334407291469990832437230m, 78322691297526401047122740223m, 4348529951871323093202439165m, 4990460191572192980035045640m, 5597312470813537077508379404m, 4980755617409140165251173636m, 1890741055734852330174483975m, 76772801025035254361275759599m,
+        75502243563200070682362835182m, 78896921543467230670583692029m, 2489164206166677455700101373m, 4338830174078735659125311481m, 4960199192571758553533648130m, 3420013420025511569771334658m, 1557077491473974933188251927m, 77376040767919248347203368440m,
+        73949978050619586491881614568m, 77043619187199676893167803647m, 1212557245150259869494540530m, 3081561358716686153294085872m, 3392217589357453836837847030m, 1219782446916489227407330320m, 78580145051212187267589731866m, 75798434925965430405537592305m,
+        68369566912511282590874449920m, 72396532057599326246617936384m, 75186737388538008131054524416m, 77027917484951889231108827392m, 73655004947793353634062267392m, 76417372019396591550492896512m, 74568981255592060493492515584m, 70529879645288096380279255040m,
     };
-        private static Func<Square, int>[] pst_eg = {
-        sq => 0,                                            //null
-        sq => sq.Rank*20,                                   //pawn
-        sq => pst_mg[2](sq),                                //knight
-        sq => pst_mg[2](sq),                                //bishop
-        sq => pst_mg[5](sq),                                //rook
-        sq => pst_mg[5](sq),                                //queen
-        sq => pst_mg[5](sq)                                 //king
-    };
 
-        static int[] phase_weight = { 0, 0, 1, 1, 2, 4, 0 };
+    private readonly int[][] UnpackedPestoTables;
 
-        public int Eval()
+    // TODO: King Safety
+    // TODO: Pawn Structure
+    // TODO: Mobility
+    private int Eval()
+    {
+        // Define evaluation variables
+        int mg = 0, eg = 0, phase = 0;
+        // Iterate through both players
+        foreach (bool stm in new[] { true, false })
         {
-            int turn = Convert.ToInt32(board.IsWhiteToMove);
-            int[] score_mg = { 0, 0 };
-            int[] score_eg = { 0, 0 };
-            int phase = 0;
-
-            for (int piece_type = 1; piece_type <= 6; piece_type++)
+            // Iterate through all piece types
+            for (int piece = 0; piece < 6; piece++)
             {
-                ulong white_bb = board.GetPieceBitboard((PieceType)piece_type, true);
-                ulong black_bb = board.GetPieceBitboard((PieceType)piece_type, false);
+                // Get piece bitboard
+                ulong bb = board.GetPieceBitboard((PieceType)(piece + 1), stm);
 
-                while (white_bb > 0)
+                // Iterate through each individual piece
+                while (bb != 0)
                 {
-                    Square sq = new Square(BitboardHelper.ClearAndGetIndexOfLSB(ref white_bb));
-                    score_mg[1] += pvm_mg[piece_type] + pst_mg[piece_type](sq);
-                    score_eg[1] += pvm_eg[piece_type] + pst_eg[piece_type](sq);
-                    phase += phase_weight[piece_type];
-                }
-                while (black_bb > 0)
-                {
-                    Square sq = new Square(BitboardHelper.ClearAndGetIndexOfLSB(ref black_bb) ^ 56);
-                    score_mg[0] += pvm_mg[piece_type] + pst_mg[piece_type](sq);
-                    score_eg[0] += pvm_eg[piece_type] + pst_eg[piece_type](sq);
-                    phase += phase_weight[piece_type];
+                    // Get square index for pst based on color
+                    int sq = BitboardHelper.ClearAndGetIndexOfLSB(ref bb) ^ (stm ? 56 : 0);
+                    // Increment mg and eg score
+                    mg += UnpackedPestoTables[sq][piece];
+                    eg += UnpackedPestoTables[sq][piece + 6];
+                    // Updating position phase
+                    phase += phase_weight[piece];
                 }
             }
+            mg = -mg;
+            eg = -eg;
+        }
 
-            return ((score_mg[turn] - score_mg[turn ^ 1]) * phase + (score_eg[turn] - score_eg[turn ^ 1]) * (24 - phase)) / 24;
+        // In case of premature promotion
+        phase = Math.Min(phase, 24);
+        // Tapered evaluation
+        return (mg * phase + eg * (24 - phase)) / 24 * (board.IsWhiteToMove ? 1 : -1);
+    }
+
+    public StrongBot()
+    {
+        UnpackedPestoTables = new int[64][];
+        for (int i = 0; i < 64; i++)
+        {
+            int pieceType = 0;
+            UnpackedPestoTables[i] = decimal.GetBits(PackedPestoTables[i]).Take(3)
+                .SelectMany(c => BitConverter.GetBytes(c)
+                    .Select((byte square) => (int)((sbyte)square * 1.461) + pvm[pieceType++]))
+                .ToArray();
         }
     }
 }
